@@ -26,6 +26,9 @@ namespace InsuranceServices.DrCaptcha.ir.Controllers
         private readonly IMongoCollection<TPerson> personCollection;
         private readonly IMongoCollection<TUser> userCollection;
         private readonly IMongoCollection<TDastmozd> dastmozdCollection;
+        private static object Lock = new object();
+
+
         public InsuranceController(IConfiguration configuration)
         {
             Configuration = configuration;
@@ -40,52 +43,55 @@ namespace InsuranceServices.DrCaptcha.ir.Controllers
         {
             try
             {
-                string passPhrase = Configuration.GetValue<string>("PassPhrase");
-                password = StringCipher.Decrypt(password, passPhrase);
-
-                ChromeOptions chromeOptions = new ChromeOptions();
-
-                string proxyString = Configuration.GetValue<string>("Proxy");
-                if (!string.IsNullOrEmpty(proxyString))
+                lock (Lock)
                 {
-                    var proxy = new Proxy();
-                    proxy.HttpProxy = proxy.SslProxy = "";
-                    chromeOptions.Proxy = proxy;
-                }
-                ChromeDriver chromeDriver = new ChromeDriver(chromeOptions);
-                chromeDriver.Navigate().GoToUrl("https://account.tamin.ir/auth/login");
-                Thread.Sleep(1000);
+                    string passPhrase = Configuration.GetValue<string>("PassPhrase");
+                    password = StringCipher.Decrypt(password, passPhrase);
 
-                if (!waitFor(chromeDriver, "ورود به سامانه", 30))
-                {
+                    ChromeOptions chromeOptions = new ChromeOptions();
+
+                    string proxyString = Configuration.GetValue<string>("Proxy");
+                    if (!string.IsNullOrEmpty(proxyString))
+                    {
+                        var proxy = new Proxy();
+                        proxy.HttpProxy = proxy.SslProxy = proxyString;
+                        chromeOptions.Proxy = proxy;
+                    }
+                    ChromeDriver chromeDriver = new ChromeDriver(chromeOptions);
+                    chromeDriver.Navigate().GoToUrl("https://account.tamin.ir/auth/login");
+                    Thread.Sleep(1000);
+
+                    if (!waitFor(chromeDriver, "ورود به سامانه", 30))
+                    {
+                        chromeDriver.Quit();
+                        return Ok(new { Status = false, Message = "زمان زیادی برای دریافت اطلاعات طول کشید، لطفا مجدد تلاش کنید" });
+                    }
+
+                    Thread.Sleep(500);
+                    chromeDriver.FindElement(By.ClassName("username")).SendKeys(username);
+                    Thread.Sleep(500);
+                    chromeDriver.FindElement(By.ClassName("password")).SendKeys(password);
+                    Thread.Sleep(500);
+                    chromeDriver.FindElement(By.ClassName("login-button")).Submit();
+                    Thread.Sleep(1000);
+
+                    if (checkAuth(chromeDriver))
+                    {
+                        chromeDriver.Quit();
+                        return Ok(new { Status = false, Message = "نام کاربری و یا رمز عبور اشتباه می باشد." });
+                    }
+
+                    chromeDriver.Navigate().GoToUrl("https://eservices.tamin.ir/view/#/salary");
+
+                    var token = (string)chromeDriver.ExecuteScript("return localStorage.getItem('access_token')");
+
+                    Thread.Sleep(1000);
+
+                    var Result = SaveData(password, token);
+
                     chromeDriver.Quit();
-                    return Ok(new { Status = false, Message = "زمان زیادی برای دریافت اطلاعات طول کشید، لطفا مجدد تلاش کنید" });
+                    return Ok(new { Status = true, Result });
                 }
-
-                Thread.Sleep(500);
-                chromeDriver.FindElement(By.ClassName("username")).SendKeys(username);
-                Thread.Sleep(500);
-                chromeDriver.FindElement(By.ClassName("password")).SendKeys(password);
-                Thread.Sleep(500);
-                chromeDriver.FindElement(By.ClassName("login-button")).Submit();
-                Thread.Sleep(1000);
-
-                if (checkAuth(chromeDriver))
-                {
-                    chromeDriver.Quit();
-                    return Ok(new { Status = false, Message = "نام کاربری و یا رمز عبور اشتباه می باشد." });
-                }
-
-                chromeDriver.Navigate().GoToUrl("https://eservices.tamin.ir/view/#/salary");
-
-                var token = (string)chromeDriver.ExecuteScript("return localStorage.getItem('access_token')");
-
-                Thread.Sleep(1000);
-
-                var Result = SaveData(password, token);
-
-                chromeDriver.Quit();
-                return Ok(new { Status = true, Result });
             }
             catch (Exception ex)
             {
@@ -100,6 +106,7 @@ namespace InsuranceServices.DrCaptcha.ir.Controllers
         }
         private TResult SaveData(string password, string token)
         {
+            #region Save data
             string userinfos = MakeRequests("https://eservices.tamin.ir/api/history-services/userinfos", token);
             JObject userinfosObject = JObject.Parse(userinfos);
             var userinfosObjectSelectToken = userinfosObject.SelectToken("data");
@@ -136,7 +143,9 @@ namespace InsuranceServices.DrCaptcha.ir.Controllers
             dastmozdCollection.DeleteMany(a => a.NationalCode == person.NationalCode);
 
             dastmozdCollection.InsertMany(dastmozdList);
+            #endregion
 
+            #region Generate Report
             TResult result = new TResult()
             {
                 Name = user.FirstName,
@@ -156,14 +165,22 @@ namespace InsuranceServices.DrCaptcha.ir.Controllers
             var lastYear = dastmozdList.OrderByDescending(a => a.hisyear).FirstOrDefault();
             int lastMonth = GetLastMonth(lastYear);
 
-            result.LastSalary = GetSpecificField(lastYear, "hiswage" + lastMonth);
-            List<long> lastSalaryList = new List<long>();
-            List<long> lastWorkDaysList = new List<long>();
-            lastSalaryList.Add(result.LastSalary);
+            result.LastSalary = Convert.ToInt64(GetSpecificField(lastYear, "hiswage" + lastMonth));
+            List<Record> lastRecord = new List<Record>();
 
             int currentMonth = lastMonth;
             int currentYear = lastYear.hisyear;
             var currentYearItem = lastYear;
+
+            Record record = new Record();
+            record.KargahName = currentYearItem.rwshname;
+            record.KargahNumber = currentYearItem.rwshid;
+            record.Month = currentMonth;
+            record.Salary = Convert.ToInt64(GetSpecificField(currentYearItem, "hiswage" + currentMonth));
+            record.WorkDayCount = Convert.ToInt32(GetSpecificField(currentYearItem, "hismon" + currentMonth));
+            record.Year = currentYear;
+            lastRecord.Add(record);
+
             for (int i = 0; i < 70; i++)
             {
                 currentMonth--;
@@ -173,30 +190,40 @@ namespace InsuranceServices.DrCaptcha.ir.Controllers
                     currentYear--;
                     currentYearItem = dastmozdList.OrderByDescending(a => a.hisyear).Skip(1).FirstOrDefault();
                 }
-                lastSalaryList.Add(GetSpecificField(currentYearItem, "hiswage" + currentMonth));
-                lastWorkDaysList.Add(GetSpecificField(currentYearItem, "hismon" + currentMonth));
+
+                record = new Record();
+                record.KargahName = currentYearItem.rwshname;
+                record.KargahNumber = currentYearItem.rwshid;
+                record.Month = currentMonth;
+                record.Salary = Convert.ToInt64(GetSpecificField(currentYearItem, "hiswage" + currentMonth));
+                record.WorkDayCount = Convert.ToInt32(GetSpecificField(currentYearItem, "hismon" + currentMonth));
+                record.Year = currentYear;
+                lastRecord.Add(record);
             }
-            result.Last3MonthsAverageSalary = lastSalaryList.Take(3).Average().ToString("##.##");
-            result.Last1YearAverageSalary = lastSalaryList.Take(12).Average().ToString("##.##");
+            result.Last3MonthsAverageSalary = lastRecord.Take(3).Select(a => a.Salary).Average().ToString("##.##");
+            result.Last1YearAverageSalary = lastRecord.Take(12).Select(a => a.Salary).Average().ToString("##.##");
 
             long totalWorkDays = 0;
             foreach (var dastmozd in dastmozdList)
             {
                 for (int month = 1; month <= 12; month++)
                 {
-                    totalWorkDays += GetSpecificField(dastmozd, "hismon" + month);
+                    totalWorkDays += Convert.ToInt64(GetSpecificField(dastmozd, "hismon" + month));
                 }
             }
             result.TotalDays = totalWorkDays;
             result.TotalMonths = (totalWorkDays / 30);
 
-            long last5workDays = lastWorkDaysList.Take(60).Sum();
-            long ordinaryLast5WorkDays = 1830;
-            var percent = ((last5workDays * 100) / ordinaryLast5WorkDays);
+            long last5MonthworkDays = lastRecord.Take(60).Select(a => a.WorkDayCount).Sum();
+            long ordinaryLast5MonthWorkDays = 1830;
+            var percent = ((last5MonthworkDays * 100) / ordinaryLast5MonthWorkDays);
             percent += 5;
             if (percent >= 100)
                 percent = 100;
             result.Last5YearInsurancePercent = percent + " %";
+
+            result.LastRecords = lastRecord.Take(6).ToList();
+            #endregion
 
             return result;
         }
@@ -204,17 +231,17 @@ namespace InsuranceServices.DrCaptcha.ir.Controllers
         {
             for (int month = 12; month > 0; month--)
             {
-                var monthSalary = GetSpecificField(lastYear, "hiswage" + month);
+                var monthSalary = Convert.ToInt64(GetSpecificField(lastYear, "hiswage" + month));
                 if (monthSalary > 0)
                     return month;
             }
             return 0;
         }
-        private long GetSpecificField(TDastmozd item, string field)
+        private string GetSpecificField(TDastmozd item, string field)
         {
             var prop = item.GetType().GetProperty(field);
             var value = prop.GetValue(item).ToString();
-            return Convert.ToInt64(value);
+            return value;
         }
 
         private bool waitFor(ChromeDriver chromeDriver, string message, int seconds)
@@ -290,6 +317,13 @@ namespace InsuranceServices.DrCaptcha.ir.Controllers
             try
             {
                 HttpWebRequest request = (HttpWebRequest)WebRequest.Create(url);
+
+                string proxyString = Configuration.GetValue<string>("Proxy");
+                if (!string.IsNullOrEmpty(proxyString))
+                {
+                    WebProxy proxy = new WebProxy(proxyString);
+                    request.Proxy = proxy;
+                }
 
                 request.UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/104.0.0.0 Safari/537.36";
                 request.Headers.Set(HttpRequestHeader.Authorization, "Bearer " + token);

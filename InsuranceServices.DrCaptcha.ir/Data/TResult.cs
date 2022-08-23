@@ -20,5 +20,15 @@ namespace InsuranceServices.DrCaptcha.ir.Data
         public long TotalDays { get; set; }
         public long TotalMonths { get; set; }
         public string Last5YearInsurancePercent { get; set; }
+        public List<Record> LastRecords { get; set; }
+    }
+    public class Record
+    {
+        public int Month { get; set; }
+        public int Year { get; set; }
+        public string KargahName { get; set; }
+        public string KargahNumber { get; set; }
+        public long Salary { get; set; }
+        public int WorkDayCount { get; set; }
     }
 }
