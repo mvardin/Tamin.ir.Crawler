@@ -26,6 +26,7 @@ namespace InsuranceServices.DrCaptcha.ir.Controllers
         private readonly IMongoCollection<TPerson> personCollection;
         private readonly IMongoCollection<TUser> userCollection;
         private readonly IMongoCollection<TDastmozd> dastmozdCollection;
+        private readonly IMongoCollection<TRequestLog> requestLogCollection;
         private static object Lock = new object();
 
 
@@ -37,14 +38,18 @@ namespace InsuranceServices.DrCaptcha.ir.Controllers
             personCollection = mongoDatabase.GetCollection<TPerson>("TPerson");
             userCollection = mongoDatabase.GetCollection<TUser>("TUser");
             dastmozdCollection = mongoDatabase.GetCollection<TDastmozd>("TDastmozd");
+            requestLogCollection = mongoDatabase.GetCollection<TRequestLog>("TRequestLog");
         }
         [HttpGet]
         public ActionResult Report(string username, string password)
         {
+            TRequestLog requestLog = new TRequestLog();
+            DateTime dtStart = DateTime.Now;
             try
             {
                 lock (Lock)
                 {
+
                     string passPhrase = Configuration.GetValue<string>("PassPhrase");
                     password = StringCipher.Decrypt(password, passPhrase);
 
@@ -90,11 +95,25 @@ namespace InsuranceServices.DrCaptcha.ir.Controllers
                     var Result = SaveData(password, token);
 
                     chromeDriver.Quit();
+
+                    requestLog.CreateLog = DateTime.Now;
+                    requestLog.Message = string.Empty;
+                    requestLog.Result = RequestLogResult.Completed;
+                    requestLog.TimeElapsed = DateTime.Now.Subtract(dtStart).TotalSeconds;
+
+                    requestLogCollection.InsertOne(requestLog);
+
                     return Ok(new { Status = true, Result });
                 }
             }
             catch (Exception ex)
             {
+                requestLog.CreateLog = DateTime.Now;
+                requestLog.Message = ex.Message;
+                requestLog.Result = RequestLogResult.Error;
+                requestLog.TimeElapsed = DateTime.Now.Subtract(dtStart).TotalSeconds;
+                requestLogCollection.InsertOne(requestLog);
+
                 return Ok(new { Status = false, Message = ex.Message });
             }
         }
